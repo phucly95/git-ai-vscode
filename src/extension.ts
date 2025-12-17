@@ -2,7 +2,7 @@
 import * as vscode from 'vscode';
 import { GitAiService } from './gitAiService';
 import { CheckpointManager } from './checkpointManager';
-import { AwsQDetector } from './awsQDetector';
+import { AwsQLogWatcher } from './awsQLogWatcher';
 
 let checkpointManager: CheckpointManager;
 
@@ -28,8 +28,9 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }));
 
-    // TODO: Implement AWS Q Detector
-    const awsQDetector = new AwsQDetector(checkpointManager);
+    // Initialize AWS Q Log Watcher
+    const logWatcher = new AwsQLogWatcher(checkpointManager);
+    context.subscriptions.push(vscode.Disposable.from({ dispose: () => logWatcher.dispose() }));
 }
 
 export function deactivate() { }
