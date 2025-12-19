@@ -98,34 +98,49 @@ export class CheckpointManager {
             return;
         }
 
-        const now = Date.now();
-        const timeSinceAi = now - this.lastAiSignalTime;
-
         // Store probable file for race-condition handling
         this.pendingFile = filePath;
 
+        // Strategy: Always assume Human first (Buffered).
+        // If it's actually AI, the LogWatcher will fire 'signalAiActivity' shortly.
+        // That signal will SEE the pending human checkpoint and UPGRADE it to AI.
+        // This handles the "File Change happens before Log" race condition perfectly.
+
+        // Exception: If we *just* had an AI signal (e.g. log came first), we can shortcut.
+        const now = Date.now();
+        const timeSinceAi = now - this.lastAiSignalTime;
         if (timeSinceAi < this.AI_SIGNAL_WINDOW_MS) {
-            this.outputChannel.appendLine(`[MANAGER] Correlated File Change to AI (delta=${timeSinceAi}ms). Path=${filePath}`);
+            this.outputChannel.appendLine(`[MANAGER] Pre-correlated File Change to AI (delta=${timeSinceAi}ms). Path=${filePath}`);
             this.requestAwsQCheckpoint(filePath);
         } else {
             this.requestHumanCheckpoint();
         }
     }
 
+    /**
+     * "Reactive" Strategy:
+     * When a file changes on disk (FileSystemWatcher), we schedule a Human Checkpoint (buffered).
+     * If an AI Signal arrives during this buffer, we CANCEL the Human Checkpoint and upgrade to AI.
+     * If the buffer expires and no AI signal came, we confirm it was Human.
+     */
     public requestHumanCheckpoint() {
         const now = Date.now();
-        // 1. Grace Period Check
+
+        // 1. Grace Period Check (Don't double-save after AI)
         if (now - this.lastAiCheckpointTime < this.AI_GRACE_PERIOD_MS) {
-            // this.outputChannel.appendLine("[MANAGER] Human checkpoint ignored (Grace Period active).");
             return;
         }
 
-        // 2. Debounce
+        // 2. Buffer/Debounce
+        // We wait 'humanDebounceMs' to see if an AI signal arrives OR to group rapid valid-saves.
         if (this.pendingHumanTimeout) {
             clearTimeout(this.pendingHumanTimeout);
+            this.pendingHumanTimeout = null;
         }
 
         this.pendingHumanTimeout = setTimeout(() => {
+            // The buffer expired. No AI signal intercepted us.
+            // Therefore: It is Human.
             this.executeHumanCheckpoint();
         }, this.humanDebounceMs);
     }

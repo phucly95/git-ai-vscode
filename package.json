@@ -30,7 +30,7 @@
         "properties": {
             "gitAi.humanDebounceMillis": {
                 "type": "number",
-                "default": 1500,
+                "default": 5000,
                 "description": "Delay in milliseconds before creating a checkpoint after human typing stops. Higher values reduce frequency."
             }
         }
