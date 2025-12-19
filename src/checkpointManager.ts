@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { GitAiService } from './gitAiService';
 
 export class CheckpointManager {
@@ -91,6 +92,12 @@ export class CheckpointManager {
         if (uri.scheme !== 'file') return;
 
         const filePath = uri.fsPath;
+
+        // Anti-Loop: Ignore .git, .git-ai, and other system folders
+        if (filePath.includes(`${path.sep}.git${path.sep}`) || filePath.includes(`${path.sep}.git-ai${path.sep}`) || filePath.includes(`${path.sep}node_modules${path.sep}`) || filePath.includes('.DS_Store')) {
+            return;
+        }
+
         const now = Date.now();
         const timeSinceAi = now - this.lastAiSignalTime;
 
@@ -124,6 +131,11 @@ export class CheckpointManager {
     }
 
     public requestAwsQCheckpoint(filePath: string) {
+        // Throttling: specific to preventing spam from a single "action" that touches multiple files
+        if (Date.now() - this.lastAiCheckpointTime < 500) {
+            return;
+        }
+
         this.outputChannel.appendLine("[MANAGER] AWS Q Checkpoint requested. Cancelling pending human tasks.");
 
         if (this.pendingHumanTimeout) {
