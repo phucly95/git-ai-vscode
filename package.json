@@ -22,6 +22,18 @@
             {
                 "command": "gitAi.showDebugInfo",
                 "title": "Git AI: Show Debug Info"
+            },
+            {
+                "command": "gitAi.installCli",
+                "title": "Git AI: Install CLI to PATH"
+            },
+            {
+                "command": "gitAi.installShim",
+                "title": "Git AI: Enable Global Interception (Install Shim)"
+            },
+            {
+                "command": "gitAi.fixShellPath",
+                "title": "Git AI: Fix Shell Path (Zsh/Bash)"
             }
         ]
     },

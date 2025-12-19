@@ -6,19 +6,324 @@ import * as cp from 'child_process';
 
 export class GitAiService {
     private outputChannel: vscode.OutputChannel;
+    private context: vscode.ExtensionContext;
 
-    constructor() {
+    constructor(context: vscode.ExtensionContext) {
+        this.context = context;
         this.outputChannel = vscode.window.createOutputChannel("Git AI Integration");
     }
 
-    private get gitAiPath(): string {
+    public getBinaryResolution(): { path: string, source: 'bundled' | 'global' | 'path' } {
+        // 1. Try bundled binary (Priority for Extension)
+        const platform = os.platform();
+        const arch = os.arch();
+        let binaryName = '';
+
+        if (platform === 'darwin') {
+            binaryName = arch === 'arm64' ? path.join('macos-arm64', 'git-ai') : path.join('macos-intel', 'git-ai');
+        } else if (platform === 'win32') {
+            binaryName = path.join('windows-x64', 'git-ai.exe');
+        }
+
+        if (binaryName) {
+            const bundledPath = path.join(this.context.extensionPath, 'bin', binaryName);
+            if (fs.existsSync(bundledPath)) {
+                // Try to ensure execution permissions on Unix-like systems
+                if (platform !== 'win32') {
+                    try {
+                        fs.chmodSync(bundledPath, 0o755);
+                    } catch (err) {
+                        console.error(`[WARN] Failed to chmod ${bundledPath}:`, err);
+                    }
+                }
+                return { path: bundledPath, source: 'bundled' };
+            } else {
+                console.log(`[DEBUG] Bundled binary not found at: ${bundledPath}`);
+            }
+        }
+
+        // 2. Fallback to existing logic (global install or relative path)
         const homeDir = os.homedir();
         const defaultPath = path.join(homeDir, '.git-ai', 'bin', 'git-ai');
 
         if (fs.existsSync(defaultPath)) {
-            return defaultPath;
+            return { path: defaultPath, source: 'global' };
         }
-        return 'git-ai'; // Fallback to PATH
+        return { path: 'git-ai', source: 'path' };
+    }
+
+    private get gitAiPath(): string {
+        return this.getBinaryResolution().path;
+    }
+
+    public async isCliInstalled(): Promise<boolean> {
+        const homeDir = os.homedir();
+        // Check common locations
+        const locations = [
+            path.join(homeDir, '.local', 'bin', 'git-ai'),
+            '/usr/local/bin/git-ai',
+            path.join(homeDir, '.cargo', 'bin', 'git-ai')
+        ];
+
+        for (const loc of locations) {
+            if (fs.existsSync(loc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public async isShimInstalled(): Promise<boolean> {
+        const homeDir = os.homedir();
+        const shimDir = path.join(homeDir, '.local', 'bin');
+        const gitShim = path.join(shimDir, 'git');
+        const configPath = path.join(homeDir, '.git-ai', 'config.json');
+
+        if (fs.existsSync(gitShim) && fs.existsSync(configPath)) {
+            // Validate Config: If it points to 'git-og', it's the old broken version.
+            try {
+                const configContent = fs.readFileSync(configPath, 'utf8');
+                const config = JSON.parse(configContent);
+                if (config.git_path && config.git_path.includes('git-og')) {
+                    // Detected legacy/broken config. Treat as not installed to force update.
+                    return false;
+                }
+                return true;
+            } catch (err) {
+                // Config unreadable? re-install.
+                return false;
+            }
+        }
+        return false;
+    }
+
+    public async installBundledCli(): Promise<string> {
+        const resolution = this.getBinaryResolution();
+        if (resolution.source !== 'bundled') {
+            throw new Error("No bundled binary found to install.");
+        }
+
+        const sourcePath = resolution.path;
+        const homeDir = os.homedir();
+        // Default target: ~/.local/bin/git-ai
+        const targetDir = path.join(homeDir, '.local', 'bin');
+        const targetPath = path.join(targetDir, 'git-ai');
+
+        if (!fs.existsSync(targetDir)) {
+            try {
+                fs.mkdirSync(targetDir, { recursive: true });
+            } catch (err) {
+                throw new Error(`Could not create ${targetDir}. Please create it manually.`);
+            }
+        }
+
+        // Copy file
+        try {
+            fs.copyFileSync(sourcePath, targetPath);
+            if (os.platform() !== 'win32') {
+                fs.chmodSync(targetPath, 0o755);
+            }
+        } catch (err: any) {
+            throw new Error(`Failed to copy binary to ${targetPath}: ${err.message}`);
+        }
+
+        return targetPath;
+    }
+
+    public async installGlobalShim(): Promise<string> {
+        const resolution = this.getBinaryResolution();
+        if (resolution.source !== 'bundled') {
+            throw new Error("No bundled binary found to install.");
+        }
+
+        const sourcePath = resolution.path;
+        const homeDir = os.homedir();
+        const targetDir = path.join(homeDir, '.local', 'bin');
+
+        if (!fs.existsSync(targetDir)) {
+            try {
+                fs.mkdirSync(targetDir, { recursive: true });
+            } catch (err) {
+                throw new Error(`Could not create ${targetDir}. Please create it manually.`);
+            }
+        }
+
+        // 1. Identify Real Git
+        const gitShimPath = path.join(targetDir, 'git');
+        const gitAiDestPath = path.join(targetDir, 'git-ai');
+
+        const realGitPath = await this.findRealGitPath();
+        if (!realGitPath) {
+            throw new Error("Could not find a standard 'git' executable to shim.");
+        }
+
+        // 2. Install git-ai binary if not present (or update it)
+        try {
+            fs.copyFileSync(sourcePath, gitAiDestPath);
+            if (os.platform() !== 'win32') {
+                fs.chmodSync(gitAiDestPath, 0o755);
+            }
+        } catch (err: any) {
+            throw new Error(`Failed to copy git-ai to ${gitAiDestPath}: ${err.message}`);
+        }
+
+        // 3. Create 'git' symlink -> git-ai
+        try {
+            if (fs.existsSync(gitShimPath)) {
+                fs.unlinkSync(gitShimPath);
+            }
+            fs.symlinkSync(gitAiDestPath, gitShimPath);
+        } catch (err: any) {
+            throw new Error(`Failed to create git shim symlink: ${err.message}`);
+        }
+
+        // 4. Create/Update Config (~/.git-ai/config.json)
+        const configDir = path.join(homeDir, '.git-ai');
+        const configPath = path.join(configDir, 'config.json');
+
+        if (!fs.existsSync(configDir)) {
+            fs.mkdirSync(configDir, { recursive: true });
+        }
+
+        // Use absolute path to real git, preventing "cannot handle og as builtin" error
+        const configContent = {
+            git_path: realGitPath
+        };
+
+        try {
+            fs.writeFileSync(configPath, JSON.stringify(configContent, null, 2));
+        } catch (err: any) {
+            throw new Error(`Failed to write config file ${configPath}: ${err.message}`);
+        }
+
+        // 5. Configure VS Code git.path
+        await this.checkAndConfigureGitPath(gitShimPath);
+
+        return targetDir;
+    }
+
+    public async checkAndConfigureGitPath(shimPath: string): Promise<void> {
+        const config = vscode.workspace.getConfiguration('git');
+        const currentPath = config.get<string>('path');
+
+        // Normalize paths for comparison
+        const normShimPath = path.resolve(shimPath);
+        const normCurrentPath = currentPath ? path.resolve(currentPath) : null;
+
+        if (normCurrentPath !== normShimPath) {
+            console.log(`[Git AI] Updating git.path from '${currentPath}' to '${shimPath}'`);
+            try {
+                // Update Global Settings (User Level)
+                await config.update('path', shimPath, vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(`Git AI: Updated VS Code 'git.path' to use the shim.`);
+            } catch (error) {
+                console.error(`[Git AI] Failed to update git.path:`, error);
+                vscode.window.showErrorMessage(`Git AI: Failed to configure 'git.path'. Please manually set it to: ${shimPath}`);
+            }
+        }
+    }
+
+    private async findRealGitPath(): Promise<string | null> {
+        // Logic to find 'git' that is NOT our shim
+        // We can shell out to 'which -a git' (unix) or 'where git' (win) and pick first one that isn't ~/.local/bin/git
+        const cmd = os.platform() === 'win32' ? 'where git' : 'which -a git';
+
+        return new Promise((resolve) => {
+            const child_process = require('child_process');
+            child_process.exec(cmd, (err: any, stdout: string) => {
+                if (err) {
+                    resolve(null);
+                    return;
+                }
+                const lines = stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
+                const homeDir = os.homedir();
+                const shimDir = path.join(homeDir, '.local', 'bin');
+
+                for (const line of lines) {
+                    const p = line.trim();
+                    // Check if this path is NOT inside our shim directory
+                    // Also check if it's not containing "git-ai" just in case
+                    if (!p.includes(shimDir) && !p.includes('git-ai')) {
+                        resolve(p);
+                        return;
+                    }
+                }
+                resolve(null);
+            });
+        });
+    }
+
+    public async configureShellPath(): Promise<void> {
+        if (os.platform() === 'win32') {
+            return;
+        }
+
+        const homeDir = os.homedir();
+
+        // Potential RC files to update
+        const rcFiles: string[] = [];
+
+        // 1. Check SHELL env var
+        const shell = process.env.SHELL;
+        if (shell) {
+            if (shell.includes('zsh')) {
+                rcFiles.push(path.join(homeDir, '.zshrc'));
+            } else if (shell.includes('bash')) {
+                rcFiles.push(os.platform() === 'darwin' ? path.join(homeDir, '.bash_profile') : path.join(homeDir, '.bashrc'));
+            }
+        }
+
+        // 2. Fallback: Check common files if they exist or if SHELL is unknown/unset
+        if (rcFiles.length === 0) {
+            const commonFiles = ['.zshrc', '.bash_profile', '.bashrc', '.profile'];
+            for (const f of commonFiles) {
+                const p = path.join(homeDir, f);
+                if (fs.existsSync(p)) {
+                    rcFiles.push(p);
+                }
+            }
+        }
+
+        // 3. Fallback: If absolutely nothing exists, pick a default to create
+        if (rcFiles.length === 0) {
+            if (os.platform() === 'darwin') {
+                rcFiles.push(path.join(homeDir, '.zshrc'));
+            } else {
+                rcFiles.push(path.join(homeDir, '.bashrc'));
+            }
+        }
+
+        // De-duplicate
+        const uniqueRcFiles = [...new Set(rcFiles)];
+        let updated = false;
+
+        for (const rcFile of uniqueRcFiles) {
+            try {
+                // Create if not exists
+                if (!fs.existsSync(rcFile)) {
+                    fs.writeFileSync(rcFile, '');
+                }
+
+                const content = fs.readFileSync(rcFile, 'utf8');
+                // Check if our SPECIFIC export is already there to avoid false positives (e.g. .local/bin/env)
+                if (content.includes('export PATH="$HOME/.local/bin:$PATH"')) {
+                    continue;
+                }
+
+                // Append export
+                this.outputChannel.appendLine(`[INFO] Appending git-ai shim path to ${rcFile}`);
+                const exportLine = `\n# Added by git-ai-vscode to ensure correct attribution\nexport PATH="$HOME/.local/bin:$PATH"\n`;
+                fs.appendFileSync(rcFile, exportLine);
+                updated = true;
+            } catch (error: any) {
+                console.error(`[Git AI] Failed to configure ${rcFile}:`, error);
+                this.outputChannel.appendLine(`[ERROR] Failed to configure ${rcFile}: ${error.message}`);
+            }
+        }
+
+        if (updated) {
+            vscode.window.showInformationMessage(`Git AI: Updated shell configuration to use git-ai shim.`);
+        }
     }
 
     public checkpointHuman(filePath?: string): Promise<void> {
