@@ -21,8 +21,8 @@ export class GitAiService {
         return 'git-ai'; // Fallback to PATH
     }
 
-    public checkpointHuman() {
-        this.runCommand(['checkpoint']);
+    public checkpointHuman(): Promise<void> {
+        return this.runCommand(['checkpoint']);
     }
 
     public checkpointAwsQ(repoDir: string, filePath?: string) {
@@ -54,37 +54,48 @@ export class GitAiService {
         });
 
         // The CLI expects the payload as a string argument
-        this.runCommand(['checkpoint', 'agent-v1', '--hook-input', payload], repoDir);
+        return this.runCommand(['checkpoint', 'agent-v1', '--hook-input', payload], repoDir);
     }
 
-    private runCommand(args: string[], cwd?: string) {
-        const executable = this.gitAiPath;
+    private runCommand(args: string[], cwd?: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const executable = this.gitAiPath;
 
-        if (path.isAbsolute(executable) && !fs.existsSync(executable)) {
-            this.outputChannel.appendLine(`[WARN] Binary not found at ${executable}`);
-            return;
-        }
+            if (path.isAbsolute(executable) && !fs.existsSync(executable)) {
+                this.outputChannel.appendLine(`[WARN] Binary not found at ${executable}`);
+                return reject(new Error(`Binary not found at ${executable}`));
+            }
 
-        const workingDir = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workingDir) {
-            return;
-        }
+            const workingDir = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workingDir) {
+                return reject(new Error("No working directory found"));
+            }
 
-        const commandStr = `${executable} ${args.join(' ')}`;
-        this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
+            const commandStr = `${executable} ${args.join(' ')}`;
+            this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
 
-        const child = cp.spawn(executable, args, { cwd: workingDir });
+            const child = cp.spawn(executable, args, { cwd: workingDir });
 
-        child.stdout.on('data', (data) => {
-            this.outputChannel.appendLine(`[INFO] ${data.toString().trim()}`);
-        });
+            child.stdout.on('data', (data) => {
+                this.outputChannel.appendLine(`[INFO] ${data.toString().trim()}`);
+            });
 
-        child.stderr.on('data', (data) => {
-            this.outputChannel.appendLine(`[ERROR] ${data.toString().trim()}`);
-        });
+            child.stderr.on('data', (data) => {
+                this.outputChannel.appendLine(`[ERROR] ${data.toString().trim()}`);
+            });
 
-        child.on('error', (err) => {
-            this.outputChannel.appendLine(`[FATAL] Failed to start command: ${err.message}`);
+            child.on('error', (err) => {
+                this.outputChannel.appendLine(`[FATAL] Failed to start command: ${err.message}`);
+                reject(err);
+            });
+
+            child.on('close', (code) => {
+                if (code === 0) {
+                    resolve();
+                } else {
+                    reject(new Error(`Command failed with exit code ${code}`));
+                }
+            });
         });
     }
 }

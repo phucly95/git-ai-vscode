@@ -13,6 +13,10 @@ export class CheckpointManager {
     private lastAiSignalTime: number = 0;
     private readonly AI_SIGNAL_WINDOW_MS = 10000; // Increased to 10s for debugging
 
+    // Checkpoint Counters
+    private aiCheckpointCount: number = 0;
+    private humanCheckpointCount: number = 0;
+
     // Time when the last AI checkpoint finished.
     private lastAiCheckpointTime: number = 0;
     private readonly AI_GRACE_PERIOD_MS = 5000;
@@ -26,19 +30,31 @@ export class CheckpointManager {
         // Initialize Status Bar
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.statusBarItem.command = "gitAi.showDebugInfo";
-        this.updateStatus("Git AI: Initializing...", "sync~spin");
+        this.renderStatus("Initializing...");
         this.statusBarItem.show();
     }
 
-    public updateStatus(text: string, icon: string = "eye", tooltip: string = "") {
-        this.statusBarItem.text = `$(${icon}) ${text}`;
-        this.statusBarItem.tooltip = tooltip || text;
+    private renderStatus(transientMsg?: string) {
+        if (transientMsg) {
+            this.statusBarItem.text = `Git AI: ${transientMsg}`;
+            // Revert to counters after 3s
+            setTimeout(() => this.renderStatus(), 3000);
+        } else {
+            this.statusBarItem.text = `Git AI: $(hubot) ${this.aiCheckpointCount}   $(edit) ${this.humanCheckpointCount}`;
+        }
+        this.statusBarItem.tooltip = "Git AI Integration\n$(hubot) AI Checkpoints\n$(edit) Human Checkpoints\nClick for Debug Info";
+    }
 
-        // Reset to default after 5 seconds if it's an activity signal
-        if (text.includes("Signal") || text.includes("Checkpoint")) {
-            setTimeout(() => {
-                this.updateStatus("Git AI: Watching", "eye");
-            }, 5000);
+    // Adapter for legacy calls (Watcher)
+    public updateStatus(text: string, icon: string = "eye", tooltip: string = "") {
+        if (text.includes("Signal")) {
+            this.renderStatus("$(broadcast) Signal!");
+        } else if (text.includes("Watching")) {
+            // Don't override counters for "Watching", just log or tooltip?
+            // actually, showing "Watching" at startup is nice.
+            this.renderStatus("$(eye) Watching");
+        } else {
+            this.renderStatus(text);
         }
     }
 
@@ -46,7 +62,7 @@ export class CheckpointManager {
         this.lastAiSignalTime = Date.now();
         this.outputChannel.appendLine("[MANAGER] AI Activity Signal received.");
 
-        this.updateStatus("Git AI: AWS Q Signal!", "hubot");
+        this.renderStatus("$(broadcast) Signal!");
 
         // Debug Toast
         // vscode.window.showInformationMessage("Git AI: AWS Q Signal Detected!");
@@ -56,7 +72,7 @@ export class CheckpointManager {
         // Upgrade it to an AI checkpoint immediately.
         if (this.pendingHumanTimeout) {
             this.outputChannel.appendLine("[MANAGER] Upgrading pending Human checkpoint to AWS Q due to signal.");
-            this.updateStatus("Git AI: Upgrading to AWS Q", "arrow-up");
+            this.renderStatus("$(arrow-up) Upgrading...");
             clearTimeout(this.pendingHumanTimeout);
             this.pendingHumanTimeout = null;
 
@@ -78,7 +94,6 @@ export class CheckpointManager {
 
         if (timeSinceAi < this.AI_SIGNAL_WINDOW_MS) {
             this.outputChannel.appendLine(`[MANAGER] Correlated File Change to AI (delta=${timeSinceAi}ms). Path=${filePath}`);
-            this.updateStatus("Git AI: Checkpoint (AWS Q)", "check");
             this.requestAwsQCheckpoint(filePath);
         } else {
             this.requestHumanCheckpoint();
@@ -121,13 +136,23 @@ export class CheckpointManager {
         if (now - this.lastAiCheckpointTime < this.AI_GRACE_PERIOD_MS) {
             return;
         }
-        this.gitAiService.checkpointHuman();
+        this.gitAiService.checkpointHuman()
+            .then(() => {
+                this.humanCheckpointCount++;
+                this.renderStatus();
+            })
+            .catch(e => console.error(e));
     }
 
     private executeAwsQCheckpoint(filePath: string) {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
         if (workspaceFolder) {
-            this.gitAiService.checkpointAwsQ(workspaceFolder.uri.fsPath, filePath);
+            this.gitAiService.checkpointAwsQ(workspaceFolder.uri.fsPath, filePath)
+                .then(() => {
+                    this.aiCheckpointCount++;
+                    this.renderStatus("$(check) AI Saved");
+                })
+                .catch(e => console.error(e));
         }
     }
 }
