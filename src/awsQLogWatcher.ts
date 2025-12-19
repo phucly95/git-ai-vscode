@@ -22,7 +22,7 @@ export class AwsQLogWatcher {
         this.findLogFile().then(logFile => {
             if (logFile) {
                 this.outputChannel.appendLine(`[WATCHER] Found Amazon Q log file: ${logFile}`);
-                vscode.window.showInformationMessage(`Git AI: Watching Log: ${path.basename(logFile)}`);
+                this.checkpointManager.updateStatus("Git AI: Watching", "eye", `Watching Log: ${path.basename(logFile)}`);
                 this.tailFile(logFile);
             } else {
                 this.outputChannel.appendLine("[WATCHER] Amazon Q log file not found. Retrying in 10s...");
@@ -144,7 +144,7 @@ export class AwsQLogWatcher {
 
             if (line.includes('fsReplace') || line.includes('fsWrite') || line.includes('fsDelete') || line.includes('agenticCodeAccepted')) {
                 this.outputChannel.appendLine(`[WATCHER] !!! MATCHED SIGNAL !!! : ${line.substring(0, 100)}...`);
-                vscode.window.showInformationMessage("Git AI: AWS Q Signal Detected!");
+                this.checkpointManager.updateStatus("Git AI: Signal Detected", "broadcast");
                 this.checkpointManager.signalAiActivity();
             }
         }

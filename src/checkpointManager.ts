@@ -4,6 +4,7 @@ import { GitAiService } from './gitAiService';
 export class CheckpointManager {
     private gitAiService: GitAiService;
     private outputChannel: vscode.OutputChannel;
+    private statusBarItem: vscode.StatusBarItem;
 
     private pendingHumanTimeout: NodeJS.Timeout | null = null;
     private pendingFile: string | null = null;
@@ -21,11 +22,31 @@ export class CheckpointManager {
         this.gitAiService = gitAiService;
         this.outputChannel = vscode.window.createOutputChannel("Git AI Manager");
         this.outputChannel.appendLine("CheckpointManager initialized.");
+
+        // Initialize Status Bar
+        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+        this.statusBarItem.command = "gitAi.showDebugInfo";
+        this.updateStatus("Git AI: Initializing...", "sync~spin");
+        this.statusBarItem.show();
+    }
+
+    public updateStatus(text: string, icon: string = "eye", tooltip: string = "") {
+        this.statusBarItem.text = `$(${icon}) ${text}`;
+        this.statusBarItem.tooltip = tooltip || text;
+
+        // Reset to default after 5 seconds if it's an activity signal
+        if (text.includes("Signal") || text.includes("Checkpoint")) {
+            setTimeout(() => {
+                this.updateStatus("Git AI: Watching", "eye");
+            }, 5000);
+        }
     }
 
     public signalAiActivity() {
         this.lastAiSignalTime = Date.now();
         this.outputChannel.appendLine("[MANAGER] AI Activity Signal received.");
+
+        this.updateStatus("Git AI: AWS Q Signal!", "hubot");
 
         // Debug Toast
         // vscode.window.showInformationMessage("Git AI: AWS Q Signal Detected!");
@@ -35,7 +56,7 @@ export class CheckpointManager {
         // Upgrade it to an AI checkpoint immediately.
         if (this.pendingHumanTimeout) {
             this.outputChannel.appendLine("[MANAGER] Upgrading pending Human checkpoint to AWS Q due to signal.");
-            vscode.window.showInformationMessage("Git AI: Upgrading Human Checkpoint -> AWS Q");
+            this.updateStatus("Git AI: Upgrading to AWS Q", "arrow-up");
             clearTimeout(this.pendingHumanTimeout);
             this.pendingHumanTimeout = null;
 
@@ -57,7 +78,7 @@ export class CheckpointManager {
 
         if (timeSinceAi < this.AI_SIGNAL_WINDOW_MS) {
             this.outputChannel.appendLine(`[MANAGER] Correlated File Change to AI (delta=${timeSinceAi}ms). Path=${filePath}`);
-            vscode.window.showInformationMessage("Git AI: Checkpoint (AWS Q)");
+            this.updateStatus("Git AI: Checkpoint (AWS Q)", "check");
             this.requestAwsQCheckpoint(filePath);
         } else {
             this.requestHumanCheckpoint();
