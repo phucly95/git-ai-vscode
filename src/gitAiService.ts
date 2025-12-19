@@ -71,7 +71,7 @@ export class GitAiService {
         }
 
         const commandStr = `${executable} ${args.join(' ')}`;
-        // this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
+        this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
 
         const child = cp.spawn(executable, args, { cwd: workingDir });
 

@@ -10,6 +10,7 @@ export class AwsQLogWatcher {
     private currentLogFile: string | null = null;
     private currentLogSize: number = 0;
     private watcher: fs.FSWatcher | null = null;
+    private intervalId: NodeJS.Timeout | null = null;
 
     constructor(checkpointManager: CheckpointManager) {
         this.checkpointManager = checkpointManager;
@@ -21,6 +22,7 @@ export class AwsQLogWatcher {
         this.findLogFile().then(logFile => {
             if (logFile) {
                 this.outputChannel.appendLine(`[WATCHER] Found Amazon Q log file: ${logFile}`);
+                vscode.window.showInformationMessage(`Git AI: Watching Log: ${path.basename(logFile)}`);
                 this.tailFile(logFile);
             } else {
                 this.outputChannel.appendLine("[WATCHER] Amazon Q log file not found. Retrying in 10s...");
@@ -81,25 +83,29 @@ export class AwsQLogWatcher {
         const stats = fs.statSync(filePath);
         this.currentLogSize = stats.size;
 
-        this.outputChannel.appendLine(`[WATCHER] Monitoring started. Current size: ${this.currentLogSize}`);
+        this.outputChannel.appendLine(`[WATCHER] Monitoring started (Polling). Current size: ${this.currentLogSize}`);
 
-        this.watcher = fs.watch(filePath, (eventType) => {
-            if (eventType === 'change') {
-                this.readNewContent(filePath);
-            }
-        });
+        // fs.watch can be unreliable on some OS/Text editors. Using polling instead.
+        this.intervalId = setInterval(() => {
+            this.checkLogUpdates(filePath);
+        }, 1000); // Check every 1 second
     }
 
-    private readNewContent(filePath: string) {
+    private checkLogUpdates(filePath: string) {
         try {
+            // Check if file still exists
+            if (!fs.existsSync(filePath)) return;
+
             const stats = fs.statSync(filePath);
             const newSize = stats.size;
 
             if (newSize < this.currentLogSize) {
-                // Log rotated or truncated? Reset.
+                this.outputChannel.appendLine(`[WATCHER] Log reduced? Resetting size. ${this.currentLogSize} -> ${newSize}`);
                 this.currentLogSize = newSize;
                 return;
             }
+
+            this.outputChannel.appendLine(`[WATCHER] New data detected! ${this.currentLogSize} -> ${newSize} (+${newSize - this.currentLogSize} bytes)`);
 
             if (newSize === this.currentLogSize) return;
 
@@ -118,8 +124,12 @@ export class AwsQLogWatcher {
                 this.processLogContent(buffer);
             });
 
+            stream.on('error', (err) => {
+                this.outputChannel.appendLine(`[ERROR] Stream error: ${err}`);
+            });
+
         } catch (err) {
-            this.outputChannel.appendLine(`[ERROR] Error reading log: ${err}`);
+            this.outputChannel.appendLine(`[ERROR] Error polling log: ${err}`);
         }
     }
 
@@ -128,17 +138,25 @@ export class AwsQLogWatcher {
         for (const line of lines) {
             if (!line.trim()) continue;
 
-            // Heuristic string matching for performance before regex/json parse
+            // Heuristic string matching
+            // We'll log the first 200 chars to debug what we see
+            // this.outputChannel.appendLine(`[DEBUG] Line: ${line.substring(0, 150)}`);
+
             if (line.includes('fsReplace') || line.includes('fsWrite') || line.includes('fsDelete') || line.includes('agenticCodeAccepted')) {
-                this.outputChannel.appendLine(`[WATCHER] Detected Signal in line: ${line.substring(0, 100)}...`);
+                this.outputChannel.appendLine(`[WATCHER] !!! MATCHED SIGNAL !!! : ${line.substring(0, 100)}...`);
+                vscode.window.showInformationMessage("Git AI: AWS Q Signal Detected!");
                 this.checkpointManager.signalAiActivity();
             }
         }
     }
 
+    public getDebugInfo(): string {
+        return `Watched File: ${this.currentLogFile}\nFile Valid: ${fs.existsSync(this.currentLogFile || '')}\nSize: ${this.currentLogSize}`;
+    }
+
     public dispose() {
-        if (this.watcher) {
-            this.watcher.close();
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
         }
     }
 }

@@ -6,10 +6,11 @@ export class CheckpointManager {
     private outputChannel: vscode.OutputChannel;
 
     private pendingHumanTimeout: NodeJS.Timeout | null = null;
+    private pendingFile: string | null = null;
 
     // Time when the last AI activity was detected (log/signal)
     private lastAiSignalTime: number = 0;
-    private readonly AI_SIGNAL_WINDOW_MS = 2000;
+    private readonly AI_SIGNAL_WINDOW_MS = 10000; // Increased to 10s for debugging
 
     // Time when the last AI checkpoint finished.
     private lastAiCheckpointTime: number = 0;
@@ -25,17 +26,38 @@ export class CheckpointManager {
     public signalAiActivity() {
         this.lastAiSignalTime = Date.now();
         this.outputChannel.appendLine("[MANAGER] AI Activity Signal received.");
+
+        // Debug Toast
+        // vscode.window.showInformationMessage("Git AI: AWS Q Signal Detected!");
+
+        // FIX: If we have a pending human checkpoint, it means a file changed recently.
+        // If this signal arrives now, that change was likely caused by AI.
+        // Upgrade it to an AI checkpoint immediately.
+        if (this.pendingHumanTimeout) {
+            this.outputChannel.appendLine("[MANAGER] Upgrading pending Human checkpoint to AWS Q due to signal.");
+            vscode.window.showInformationMessage("Git AI: Upgrading Human Checkpoint -> AWS Q");
+            clearTimeout(this.pendingHumanTimeout);
+            this.pendingHumanTimeout = null;
+
+            if (this.pendingFile) {
+                this.requestAwsQCheckpoint(this.pendingFile);
+            }
+        }
     }
 
-    public handleFileChange(document: vscode.TextDocument) {
-        if (document.uri.scheme !== 'file') return;
+    public handleFileChange(uri: vscode.Uri) {
+        if (uri.scheme !== 'file') return;
 
-        const filePath = document.uri.fsPath;
+        const filePath = uri.fsPath;
         const now = Date.now();
         const timeSinceAi = now - this.lastAiSignalTime;
 
+        // Store probable file for race-condition handling
+        this.pendingFile = filePath;
+
         if (timeSinceAi < this.AI_SIGNAL_WINDOW_MS) {
             this.outputChannel.appendLine(`[MANAGER] Correlated File Change to AI (delta=${timeSinceAi}ms). Path=${filePath}`);
+            vscode.window.showInformationMessage("Git AI: Checkpoint (AWS Q)");
             this.requestAwsQCheckpoint(filePath);
         } else {
             this.requestHumanCheckpoint();

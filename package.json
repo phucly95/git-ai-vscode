@@ -13,6 +13,18 @@
     "activationEvents": [
         "*"
     ],
+    "contributes": {
+        "commands": [
+            {
+                "command": "gitAi.testSignal",
+                "title": "Git AI: Test AI Signal (Debug)"
+            },
+            {
+                "command": "gitAi.showDebugInfo",
+                "title": "Git AI: Show Debug Info"
+            }
+        ]
+    },
     "main": "./out/extension.js",
     "scripts": {
         "vscode:prepublish": "npm run compile",
