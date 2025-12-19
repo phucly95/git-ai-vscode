@@ -20,7 +20,12 @@ export class CheckpointManager {
     // Time when the last AI checkpoint finished.
     private lastAiCheckpointTime: number = 0;
     private readonly AI_GRACE_PERIOD_MS = 5000;
-    private readonly HUMAN_DEBOUNCE_MS = 1500;
+
+    // Configurable via 'gitAi.humanDebounceMillis'
+    private get humanDebounceMs(): number {
+        const config = vscode.workspace.getConfiguration('gitAi');
+        return config.get<number>('humanDebounceMillis', 1500);
+    }
 
     constructor(gitAiService: GitAiService) {
         this.gitAiService = gitAiService;
@@ -115,7 +120,7 @@ export class CheckpointManager {
 
         this.pendingHumanTimeout = setTimeout(() => {
             this.executeHumanCheckpoint();
-        }, this.HUMAN_DEBOUNCE_MS);
+        }, this.humanDebounceMs);
     }
 
     public requestAwsQCheckpoint(filePath: string) {
@@ -136,7 +141,8 @@ export class CheckpointManager {
         if (now - this.lastAiCheckpointTime < this.AI_GRACE_PERIOD_MS) {
             return;
         }
-        this.gitAiService.checkpointHuman()
+        // Pass the pending file (or null) to determine CWD
+        this.gitAiService.checkpointHuman(this.pendingFile || undefined)
             .then(() => {
                 this.humanCheckpointCount++;
                 this.renderStatus();

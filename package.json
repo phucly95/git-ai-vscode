@@ -25,6 +25,16 @@
             }
         ]
     },
+    "configuration": {
+        "title": "Git AI Integration",
+        "properties": {
+            "gitAi.humanDebounceMillis": {
+                "type": "number",
+                "default": 1500,
+                "description": "Delay in milliseconds before creating a checkpoint after human typing stops. Higher values reduce frequency."
+            }
+        }
+    },
     "main": "./out/extension.js",
     "scripts": {
         "vscode:prepublish": "npm run compile",

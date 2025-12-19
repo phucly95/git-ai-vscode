@@ -12,15 +12,9 @@ export function activate(context: vscode.ExtensionContext) {
     const gitAiService = new GitAiService();
     checkpointManager = new CheckpointManager(gitAiService);
 
-    // Listen for open document changes (Human typing)
-    // We listen to this for immediate feedback/degouncing during typing.
-    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
-        if (event.document.uri.scheme === 'file') {
-            checkpointManager.handleFileChange(event.document.uri);
-        }
-    }));
-
-    // Listen for ALL file changes (Closed files / Background agents)
+    // Listen for ALL file changes (Closed files / Background agents / Terminal commands)
+    // We rely on FileSystemWatcher effectively because it tracks actual disk writes.
+    // This covers: Save, Paste (Save), CP, MV, External Tools, and AWS Q background writes.
     const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(fileWatcher.onDidChange(uri => checkpointManager.handleFileChange(uri)));
     context.subscriptions.push(fileWatcher.onDidCreate(uri => checkpointManager.handleFileChange(uri)));

@@ -21,8 +21,12 @@ export class GitAiService {
         return 'git-ai'; // Fallback to PATH
     }
 
-    public checkpointHuman(): Promise<void> {
-        return this.runCommand(['checkpoint']);
+    public checkpointHuman(filePath?: string): Promise<void> {
+        let cwd: string | undefined;
+        if (filePath) {
+            cwd = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath;
+        }
+        return this.runCommand(['checkpoint'], cwd);
     }
 
     public checkpointAwsQ(repoDir: string, filePath?: string) {
@@ -93,6 +97,7 @@ export class GitAiService {
                 if (code === 0) {
                     resolve();
                 } else {
+                    this.outputChannel.appendLine(`[ERROR] Command failed with exit code ${code}. Command: ${commandStr}`);
                     reject(new Error(`Command failed with exit code ${code}`));
                 }
             });
