@@ -80,6 +80,7 @@ export class GitAiService {
         const gitShim = path.join(shimDir, 'git');
         const gitOgShim = path.join(shimDir, 'git-og');
         const configPath = path.join(homeDir, '.git-ai', 'config.json');
+        const versionPath = path.join(homeDir, '.git-ai', 'version');
 
         if (fs.existsSync(gitShim) && fs.existsSync(gitOgShim) && fs.existsSync(configPath)) {
             // Validate Config: If it points to 'git-og' OR to a shim path, it's broken.
@@ -104,6 +105,22 @@ export class GitAiService {
                         console.warn(`[Git AI] Detected recursive config pointing to ${normalized}. Forcing reinstall.`);
                         return false;
                     }
+                }
+
+                // Check 3: Version Mismatch
+                // If the installed version (in ~/.git-ai/version) matches current extension version, skip.
+                // Otherwise, force reinstall (update binaries & prompt restart).
+                const currentVersion = this.context.extension.packageJSON.version;
+                if (fs.existsSync(versionPath)) {
+                    const installedVersion = fs.readFileSync(versionPath, 'utf8').trim();
+                    if (installedVersion !== currentVersion) {
+                        console.log(`[Git AI] Version mismatch: Installed=${installedVersion}, Current=${currentVersion}. Forcing update.`);
+                        return false;
+                    }
+                } else {
+                    // Missing version file -> Upgrade needed
+                    console.log(`[Git AI] Missing version file. Forcing update.`);
+                    return false;
                 }
 
                 return true;
@@ -250,8 +267,23 @@ export class GitAiService {
         // 5. Configure VS Code git.path
         await this.checkAndConfigureGitPath(gitShimPath);
 
+        // 5b. Write Version File
+        const versionPath = path.join(homeDir, '.git-ai', 'version');
+        const currentVersion = this.context.extension.packageJSON.version;
+        fs.writeFileSync(versionPath, currentVersion);
+
         // 6. Configure Shell Path (Zsh/Bash) - Idempotent
         await this.configureShellPath();
+
+        // 7. Prompt for Restart
+        const action = await vscode.window.showInformationMessage(
+            "Git AI Tracking installed successfully! standard environment variables updated.",
+            "Restart VS Code"
+        );
+
+        if (action === "Restart VS Code") {
+            vscode.commands.executeCommand("workbench.action.reloadWindow");
+        }
 
         return targetDir;
     }
