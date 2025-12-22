@@ -60,6 +60,7 @@ export class GitAiService {
         const homeDir = os.homedir();
         // Check common locations
         const locations = [
+            path.join(homeDir, '.git-ai', 'bin', 'git-ai'),
             path.join(homeDir, '.local', 'bin', 'git-ai'),
             '/usr/local/bin/git-ai',
             path.join(homeDir, '.cargo', 'bin', 'git-ai')
@@ -75,19 +76,36 @@ export class GitAiService {
 
     public async isShimInstalled(): Promise<boolean> {
         const homeDir = os.homedir();
-        const shimDir = path.join(homeDir, '.local', 'bin');
+        const shimDir = path.join(homeDir, '.git-ai', 'bin');
         const gitShim = path.join(shimDir, 'git');
+        const gitOgShim = path.join(shimDir, 'git-og');
         const configPath = path.join(homeDir, '.git-ai', 'config.json');
 
-        if (fs.existsSync(gitShim) && fs.existsSync(configPath)) {
-            // Validate Config: If it points to 'git-og', it's the old broken version.
+        if (fs.existsSync(gitShim) && fs.existsSync(gitOgShim) && fs.existsSync(configPath)) {
+            // Validate Config: If it points to 'git-og' OR to a shim path, it's broken.
             try {
                 const configContent = fs.readFileSync(configPath, 'utf8');
                 const config = JSON.parse(configContent);
+
+                // Check 1: Old 'git-og' reference
                 if (config.git_path && config.git_path.includes('git-og')) {
-                    // Detected legacy/broken config. Treat as not installed to force update.
                     return false;
                 }
+
+                // Check 2: Self-Reference (Recursion Risk)
+                // If the configured git_path is inside our own shim directories, IT IS BROKEN.
+                if (config.git_path) {
+                    const normalized = path.resolve(config.git_path);
+                    const badPaths = [
+                        path.join(homeDir, '.git-ai'),
+                        path.join(homeDir, '.local', 'bin')
+                    ];
+                    if (badPaths.some(bp => normalized.startsWith(bp))) {
+                        console.warn(`[Git AI] Detected recursive config pointing to ${normalized}. Forcing reinstall.`);
+                        return false;
+                    }
+                }
+
                 return true;
             } catch (err) {
                 // Config unreadable? re-install.
@@ -105,8 +123,8 @@ export class GitAiService {
 
         const sourcePath = resolution.path;
         const homeDir = os.homedir();
-        // Default target: ~/.local/bin/git-ai
-        const targetDir = path.join(homeDir, '.local', 'bin');
+        // Default target: ~/.git-ai/bin/git-ai
+        const targetDir = path.join(homeDir, '.git-ai', 'bin');
         const targetPath = path.join(targetDir, 'git-ai');
 
         if (!fs.existsSync(targetDir)) {
@@ -138,7 +156,7 @@ export class GitAiService {
 
         const sourcePath = resolution.path;
         const homeDir = os.homedir();
-        const targetDir = path.join(homeDir, '.local', 'bin');
+        const targetDir = path.join(homeDir, '.git-ai', 'bin');
 
         if (!fs.existsSync(targetDir)) {
             try {
@@ -175,6 +193,39 @@ export class GitAiService {
             fs.symlinkSync(gitAiDestPath, gitShimPath);
         } catch (err: any) {
             throw new Error(`Failed to create git shim symlink: ${err.message}`);
+        }
+
+        // 3a. Create 'git-og' symlink -> real git
+        const gitOgShimPath = path.join(targetDir, 'git-og');
+        try {
+            if (fs.existsSync(gitOgShimPath)) {
+                fs.unlinkSync(gitOgShimPath);
+            }
+
+            // Create a Wrapper Script instead of a Symlink
+            // This avoids "cannot handle og as a builtin" errors from Git.
+            if (os.platform() === 'win32') {
+                // Windows Batch Script
+                const batchContent = `@echo off\r\n"${realGitPath}" %*`;
+                // Note: Windows shim should probably be .cmd or .bat
+                // But if we stick to 'git-og' (no ext) in strict environments, it might fail.
+                // For now, let's create 'git-og.cmd' as main, and 'git-og' as sh fallback if needed?
+                // Actually, just 'git-og' file with no ext on windows is useless.
+                // Let's create 'git-og.cmd' AND 'git-og' (sh) for git bash users.
+
+                fs.writeFileSync(gitOgShimPath + '.cmd', batchContent);
+                // Also create shell script for Bash on Windows
+                const shContent = `#!/bin/sh\nexec "${realGitPath.replace(/\\/g, '/')}" "$@"\n`;
+                fs.writeFileSync(gitOgShimPath, shContent);
+            } else {
+                // Unix Shell Script
+                const shContent = `#!/bin/sh\nexec "${realGitPath}" "$@"\n`;
+                fs.writeFileSync(gitOgShimPath, shContent);
+                fs.chmodSync(gitOgShimPath, 0o755);
+            }
+        } catch (err: any) {
+            // Non-critical but good to warn
+            console.warn(`[Git AI] Failed to create git-og shim: ${err.message}`);
         }
 
         // 4. Create/Update Config (~/.git-ai/config.json)
@@ -237,15 +288,40 @@ export class GitAiService {
                 }
                 const lines = stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
                 const homeDir = os.homedir();
-                const shimDir = path.join(homeDir, '.local', 'bin');
+
+                // Dynamic exclusion: Exclude ANY path that contains .git-ai or .local/bin
+                // This ensures we don't accidentally pick up our own shims or broken symlinks
+                const excludePatterns = [
+                    path.join(homeDir, '.git-ai'),
+                    path.join(homeDir, '.local', 'bin')
+                ];
 
                 for (const line of lines) {
                     const p = line.trim();
-                    // Check if this path is NOT inside our shim directory
-                    // Also check if it's not containing "git-ai" just in case
-                    if (!p.includes(shimDir) && !p.includes('git-ai')) {
+                    const isShim = excludePatterns.some(pattern => p.startsWith(pattern));
+
+                    if (isShim || p.includes('git-ai')) {
+                        continue;
+                    }
+
+                    // ULTIMATE SAFETY CHECK: Resolve Symlinks
+                    // If 'p' is a symlink that points to 'git-ai', we MUST skip it.
+                    try {
+                        const resolved = fs.realpathSync(p);
+                        const basename = path.basename(resolved).toLowerCase();
+                        if (basename === 'git-ai' || basename === 'git-ai.exe') {
+                            // It points to us. Skip!
+                            continue;
+                        }
+
+                        // Verify it's actually executable
+                        fs.accessSync(p, fs.constants.X_OK);
+
+                        // If we got here, it's a valid candidate (not us, executable)
                         resolve(p);
                         return;
+                    } catch (e) {
+                        // Skip if not resolvable or not executable
                     }
                 }
                 resolve(null);
@@ -306,13 +382,13 @@ export class GitAiService {
 
                 const content = fs.readFileSync(rcFile, 'utf8');
                 // Check if our SPECIFIC export is already there to avoid false positives (e.g. .local/bin/env)
-                if (content.includes('export PATH="$HOME/.local/bin:$PATH"')) {
+                if (content.includes('export PATH="$HOME/.git-ai/bin:$PATH"')) {
                     continue;
                 }
 
                 // Append export
                 this.outputChannel.appendLine(`[INFO] Appending git-ai shim path to ${rcFile}`);
-                const exportLine = `\n# Added by git-ai-vscode to ensure correct attribution\nexport PATH="$HOME/.local/bin:$PATH"\n`;
+                const exportLine = `\n# Added by git-ai-vscode to ensure correct attribution\nexport PATH="$HOME/.git-ai/bin:$PATH"\n`;
                 fs.appendFileSync(rcFile, exportLine);
                 updated = true;
             } catch (error: any) {

@@ -18,7 +18,7 @@ export function activate(context: vscode.ExtensionContext) {
     setTimeout(async () => {
         const installed = await gitAiService.isShimInstalled();
         const homeDir = require('os').homedir();
-        const shimDir = require('path').join(homeDir, '.local', 'bin');
+        const shimDir = require('path').join(homeDir, '.git-ai', 'bin');
         const shimPath = require('path').join(shimDir, 'git');
 
         // 1. Ensure Integrated Terminal uses the shim (No restart needed)
@@ -60,7 +60,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Register Shim Install Command
     context.subscriptions.push(vscode.commands.registerCommand('gitAi.installShim', async () => {
         const selection = await vscode.window.showWarningMessage(
-            "This will modify your 'git' command by installing a shim in '~/.local/bin'. It allows git-ai to track ownership of all your commits. Proceed?",
+            "This will modify your 'git' command by installing a shim in '~/.git-ai/bin'. It allows git-ai to track ownership of all your commits. Proceed?",
             "Yes, Install Shim",
             "Cancel"
         );
