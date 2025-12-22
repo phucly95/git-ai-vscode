@@ -250,6 +250,9 @@ export class GitAiService {
         // 5. Configure VS Code git.path
         await this.checkAndConfigureGitPath(gitShimPath);
 
+        // 6. Configure Shell Path (Zsh/Bash) - Idempotent
+        await this.configureShellPath();
+
         return targetDir;
     }
 
