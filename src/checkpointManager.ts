@@ -156,8 +156,8 @@ export class CheckpointManager {
             const shortMsg = c.subject.length > 25 ? c.subject.substring(0, 24) + '...' : c.subject;
             const shortAuth = c.author.length > 15 ? c.author.substring(0, 14) + '...' : c.author;
             // Escape pipe characters just in case
-            const safeMsg = shortMsg.replace(/\|/g, '\\|');
-            // Use non-breaking spaces to ensure author stays on one line
+            // Use non-breaking spaces to ensure message and author stay on one line
+            const safeMsg = shortMsg.replace(/\|/g, '\\|').replace(/ /g, '&nbsp;');
             const safeAuth = shortAuth.replace(/\|/g, '\\|').replace(/ /g, '&nbsp;');
 
             md.appendMarkdown(`| ${i + 1} | ${c.shortHash} | ${safeMsg} | ${safeAuth} | ${c.ai_additions + c.ai_accepted} | ${c.mixed_additions} | ${c.human_additions} | ${cAi}/${cMix}/${cHuman} |\n`);
