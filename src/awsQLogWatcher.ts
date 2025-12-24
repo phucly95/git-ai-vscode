@@ -105,9 +105,9 @@ export class AwsQLogWatcher {
                 return;
             }
 
-            this.outputChannel.appendLine(`[WATCHER] New data detected! ${this.currentLogSize} -> ${newSize} (+${newSize - this.currentLogSize} bytes)`);
-
             if (newSize === this.currentLogSize) return;
+
+            // this.outputChannel.appendLine(`[WATCHER] New data detected! ${this.currentLogSize} -> ${newSize} (+${newSize - this.currentLogSize} bytes)`);
 
             const stream = fs.createReadStream(filePath, {
                 start: this.currentLogSize,
@@ -143,7 +143,7 @@ export class AwsQLogWatcher {
             // this.outputChannel.appendLine(`[DEBUG] Line: ${line.substring(0, 150)}`);
 
             if (line.includes('fsReplace') || line.includes('fsWrite') || line.includes('fsDelete') || line.includes('agenticCodeAccepted')) {
-                this.outputChannel.appendLine(`[WATCHER] !!! MATCHED SIGNAL !!! : ${line.substring(0, 100)}...`);
+                // this.outputChannel.appendLine(`[WATCHER] !!! MATCHED SIGNAL !!! : ${line.substring(0, 100)}...`);
                 this.checkpointManager.updateStatus("Git AI: Signal Detected", "broadcast");
                 this.checkpointManager.signalAiActivity();
             }

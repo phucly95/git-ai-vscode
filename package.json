@@ -2,7 +2,7 @@
     "name": "git-ai-tracking",
     "displayName": "Git AI Tracking",
     "description": "Intelligent autosave & tracking for AI-assisted coding (AWS Q, Copilot, etc.)",
-    "version": "1.0.5",
+    "version": "1.0.0",
     "publisher": "rdb-platform",
     "engines": {
         "vscode": "^1.85.0"
@@ -20,6 +20,14 @@
                 "title": "Git AI: Test AI Signal (Debug)"
             },
             {
+                "command": "gitAi.openFullStats",
+                "title": "Git AI: Open Full Stats Report"
+            },
+            {
+                "command": "gitAi.statusBarMenu",
+                "title": "Git AI: Status Bar Menu"
+            },
+            {
                 "command": "gitAi.showDebugInfo",
                 "title": "Git AI: Show Debug Info"
             },
@@ -35,15 +43,21 @@
                 "command": "gitAi.fixShellPath",
                 "title": "Git AI: Fix Shell Path (Zsh/Bash)"
             }
-        ]
-    },
-    "configuration": {
-        "title": "Git AI Integration",
-        "properties": {
-            "gitAi.humanDebounceMillis": {
-                "type": "number",
-                "default": 5000,
-                "description": "Delay in milliseconds before creating a checkpoint after human typing stops. Higher values reduce frequency."
+        ],
+        "configuration": {
+            "title": "Git AI Integration",
+            "properties": {
+                "gitAi.humanDebounceMillis": {
+                    "type": "number",
+                    "default": 5000,
+                    "description": "Delay in milliseconds before creating a checkpoint after human typing stops. Higher values reduce frequency."
+                },
+                "gitAi.statusBarCommitDepth": {
+                    "type": "number",
+                    "default": 1,
+                    "minimum": 1,
+                    "description": "Number of recent commits to include in status bar statistics. Set to 1 for just the last commit."
+                }
             }
         }
     },
