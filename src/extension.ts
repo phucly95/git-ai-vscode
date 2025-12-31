@@ -111,6 +111,46 @@ export function activate(context: vscode.ExtensionContext) {
         const info = logWatcher.getDebugInfo();
         vscode.window.showInformationMessage(info);
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('gitAi.openFullStats', () => {
+        checkpointManager.openFullStats();
+    }));
+
+    // Status Bar Menu
+    context.subscriptions.push(vscode.commands.registerCommand('gitAi.statusBarMenu', async () => {
+        const fullStats = { label: "$(markdown) Open Full Stats Report...", description: "View full table in new editor" };
+        const setDepth = { label: "$(gear) Configure Commit Depth", description: "Change number of commits in stats" };
+        const debugInfo = { label: "$(bug) Show Debug Info", description: "Internal logs and watcher state" };
+
+        const selection = await vscode.window.showQuickPick([fullStats, setDepth, debugInfo], {
+            placeHolder: "Git AI Options"
+        });
+
+        if (selection === fullStats) {
+            checkpointManager.openFullStats();
+        } else if (selection === setDepth) {
+            const config = vscode.workspace.getConfiguration('gitAi');
+            const currentDepth = config.get<number>('statusBarCommitDepth', 1);
+
+            const depthInput = await vscode.window.showInputBox({
+                prompt: "Enter number of recent commits to analyze (1-100)",
+                value: currentDepth.toString(),
+                validateInput: (val) => {
+                    const n = parseInt(val);
+                    if (isNaN(n) || n < 1) return "Please enter a valid number greater than 0";
+                    return null;
+                }
+            });
+
+            if (depthInput) {
+                await config.update('statusBarCommitDepth', parseInt(depthInput), vscode.ConfigurationTarget.Global);
+                checkpointManager.updateLastCommitStats();
+            }
+        } else if (selection === debugInfo) {
+            const info = logWatcher.getDebugInfo();
+            vscode.window.showInformationMessage(info);
+        }
+    }));
 }
 
 export function deactivate() { }

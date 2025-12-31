@@ -4,6 +4,31 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as cp from 'child_process';
 
+export interface CommitStats {
+    human_additions: number;
+    mixed_additions: number;
+    ai_additions: number;
+    ai_accepted: number;
+    total_ai_additions: number;
+    total_ai_deletions: number;
+    time_waiting_for_ai: number;
+    git_diff_deleted_lines: number;
+    git_diff_added_lines: number;
+    tool_model_breakdown: Record<string, number>;
+}
+
+export interface DetailedCommitStats extends CommitStats {
+    hash: string;
+    shortHash: string;
+    author: string;
+    subject: string;
+}
+
+export interface RecentCommitsData {
+    aggregated: CommitStats;
+    commits: DetailedCommitStats[];
+}
+
 export class GitAiService {
     private outputChannel: vscode.OutputChannel;
     private context: vscode.ExtensionContext;
@@ -38,7 +63,7 @@ export class GitAiService {
                 }
                 return { path: bundledPath, source: 'bundled' };
             } else {
-                console.log(`[DEBUG] Bundled binary not found at: ${bundledPath}`);
+                // console.log(`[DEBUG] Bundled binary not found at: ${bundledPath}`);
             }
         }
 
@@ -114,12 +139,12 @@ export class GitAiService {
                 if (fs.existsSync(versionPath)) {
                     const installedVersion = fs.readFileSync(versionPath, 'utf8').trim();
                     if (installedVersion !== currentVersion) {
-                        console.log(`[Git AI] Version mismatch: Installed=${installedVersion}, Current=${currentVersion}. Forcing update.`);
+                        // console.log(`[Git AI] Version mismatch: Installed=${installedVersion}, Current=${currentVersion}. Forcing update.`);
                         return false;
                     }
                 } else {
                     // Missing version file -> Upgrade needed
-                    console.log(`[Git AI] Missing version file. Forcing update.`);
+                    // console.log(`[Git AI] Missing version file. Forcing update.`);
                     return false;
                 }
 
@@ -297,7 +322,7 @@ export class GitAiService {
         const normCurrentPath = currentPath ? path.resolve(currentPath) : null;
 
         if (normCurrentPath !== normShimPath) {
-            console.log(`[Git AI] Updating git.path from '${currentPath}' to '${shimPath}'`);
+            // console.log(`[Git AI] Updating git.path from '${currentPath}' to '${shimPath}'`);
             try {
                 // Update Global Settings (User Level)
                 await config.update('path', shimPath, vscode.ConfigurationTarget.Global);
@@ -492,7 +517,7 @@ export class GitAiService {
             }
 
             const commandStr = `${executable} ${args.join(' ')}`;
-            this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
+            // this.outputChannel.appendLine(`[DEBUG] Executing: ${commandStr}`);
 
             const child = cp.spawn(executable, args, { cwd: workingDir });
 
@@ -518,5 +543,150 @@ export class GitAiService {
                 }
             });
         });
+    }
+
+    public async getCommitStats(rev: string = 'HEAD'): Promise<CommitStats | null> {
+        try {
+            // Run git-ai stats <rev> --json
+            // We use a custom runCommand wrapper or just spawn it similarly to other methods
+            const executable = this.gitAiPath;
+            const args = ['stats', rev, '--json'];
+
+            // We need a way to capture output, runCommand mainly allows logging to output channel.
+            // Let's create a small helper or just use child_process directly here for simplicity 
+            // since we need stdout, not just side effects.
+
+            const workingDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!workingDir) return null;
+
+            return new Promise((resolve) => {
+                // this.outputChannel.appendLine(`[DEBUG] Running stats: ${executable} ${args.join(' ')}`);
+                const child = cp.spawn(executable, args, { cwd: workingDir });
+                let stdout = '';
+                let stderr = '';
+
+                child.stdout.on('data', (data) => {
+                    stdout += data.toString();
+                });
+
+                child.stderr.on('data', (data) => {
+                    stderr += data.toString();
+                });
+
+                child.on('close', (code) => {
+                    if (code === 0 && stdout.trim()) {
+                        try {
+                            const parsed = JSON.parse(stdout);
+                            // Support both single commit (root) and range stats (nested)
+                            const stats = parsed.range_stats || parsed;
+                            resolve(stats as CommitStats);
+                        } catch (e) {
+                            this.outputChannel.appendLine(`[ERROR] JSON Parse Failed: ${e}`);
+                            console.error("[Git AI] Failed to parse stats JSON:", e);
+                            resolve(null);
+                        }
+                    } else {
+                        this.outputChannel.appendLine(`[ERROR] Stats failed. Code: ${code}. Stderr: ${stderr}`);
+                        resolve(null);
+                    }
+                });
+
+                child.on('error', (err) => {
+                    this.outputChannel.appendLine(`[FATAL] Stats spawn error: ${err}`);
+                    console.error("[Git AI] Failed to run stats:", err);
+                    resolve(null);
+                });
+            });
+
+        } catch (error) {
+            console.error("[Git AI] getCommitStats error:", error);
+            return null;
+        }
+    }
+
+    public async getRecentStats(depth: number): Promise<RecentCommitsData | null> {
+        if (depth < 1) return null;
+        // Even for depth=1, we want the DetailedCommitStats format now for the tooltip
+
+        const workingDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!workingDir) return null;
+
+        // 1. Get list of last N commits with metadata
+        // Format: Hash|||ShortHash|||AuthorName|||Subject
+        let commitLines: string[] = [];
+        try {
+            const stdout = await new Promise<string>((resolve, reject) => {
+                // Use a delimiter that is unlikely to appear in commit messages
+                cp.exec(`git log -n ${depth} --pretty=format:"%H|||%h|||%an|||%s" HEAD`, { cwd: workingDir }, (err, out) => {
+                    if (err) reject(err);
+                    else resolve(out);
+                });
+            });
+            commitLines = stdout.trim().split('\n').filter(s => s.trim().length > 0);
+        } catch (err) {
+            console.error("[Git AI] Failed to get git log:", err);
+            this.outputChannel.appendLine(`[ERROR] git log failed: ${err}`);
+            return null;
+        }
+
+        if (commitLines.length === 0) return null;
+
+        // 2. Fetch stats for each commit in parallel
+        const results = await Promise.all(commitLines.map(async (line) => {
+            const parts = line.split('|||');
+            if (parts.length < 4) return null; // Parse error
+
+            const [hash, shortHash, author, subject] = parts;
+            const stats = await this.getCommitStats(hash);
+
+            if (!stats) return null;
+
+            return {
+                ...stats,
+                hash,
+                shortHash,
+                author,
+                subject
+            } as DetailedCommitStats;
+        }));
+
+        const validCommits = results.filter((c): c is DetailedCommitStats => c !== null);
+        if (validCommits.length === 0) return null;
+
+        // 3. Aggregate
+        const aggregated: CommitStats = {
+            human_additions: 0,
+            mixed_additions: 0,
+            ai_additions: 0,
+            ai_accepted: 0,
+            total_ai_additions: 0,
+            total_ai_deletions: 0,
+            time_waiting_for_ai: 0,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 0,
+            tool_model_breakdown: {}
+        };
+
+        for (const s of validCommits) {
+            aggregated.human_additions += s.human_additions;
+            aggregated.mixed_additions += s.mixed_additions;
+            aggregated.ai_additions += s.ai_additions;
+            aggregated.ai_accepted += s.ai_accepted;
+            aggregated.total_ai_additions += s.total_ai_additions;
+            aggregated.total_ai_deletions += s.total_ai_deletions;
+            aggregated.time_waiting_for_ai += s.time_waiting_for_ai;
+            aggregated.git_diff_deleted_lines += s.git_diff_deleted_lines;
+            aggregated.git_diff_added_lines += s.git_diff_added_lines;
+
+            // Merge breakdown
+            for (const [model, count] of Object.entries(s.tool_model_breakdown || {})) {
+                aggregated.tool_model_breakdown[model] = (aggregated.tool_model_breakdown[model] || 0) + count;
+            }
+        }
+
+        return {
+            aggregated,
+            commits: validCommits
+        };
     }
 }
