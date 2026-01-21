@@ -32,10 +32,6 @@ export class KiroProvider extends BaseAIProvider {
     // Kiro-specific signal pattern: [WriteFile] complete write file: /path/to/file
     private readonly WRITE_FILE_PATTERN = /\[WriteFile\] complete write file: (.+)/;
 
-    // Track recent writes to avoid duplicate signals
-    private recentWrites = new Map<string, number>();
-    private readonly WRITE_DEDUP_MS = 1000; // Dedupe writes within 1 second
-
     constructor() {
         super('Git AI - Kiro Provider');
         this.windowSessionId = vscode.env.sessionId;
@@ -87,7 +83,6 @@ export class KiroProvider extends BaseAIProvider {
         this.isWatching = false;
         this.currentLogFile = null;
         this.currentLogSize = 0;
-        this.recentWrites.clear();
         this.log('Stopped watching');
     }
 
@@ -99,8 +94,7 @@ export class KiroProvider extends BaseAIProvider {
             logFile: this.currentLogFile,
             logFileExists: this.currentLogFile ? fs.existsSync(this.currentLogFile) : false,
             currentSize: this.currentLogSize,
-            windowSessionId: this.windowSessionId,
-            recentWritesCount: this.recentWrites.size
+            windowSessionId: this.windowSessionId
         }, null, 2);
     }
 
@@ -255,7 +249,6 @@ export class KiroProvider extends BaseAIProvider {
 
         this.pollingInterval = setInterval(() => {
             this.pollLogFile(filePath);
-            this.cleanupRecentWrites();
         }, this.POLL_INTERVAL_MS);
     }
 
@@ -325,17 +318,9 @@ export class KiroProvider extends BaseAIProvider {
             if (writeMatch) {
                 const filePath = writeMatch[1].trim();
 
-                // Deduplicate rapid writes to same file
-                const now = Date.now();
-                const lastWrite = this.recentWrites.get(filePath);
-                if (lastWrite && (now - lastWrite) < this.WRITE_DEDUP_MS) {
-                    continue; // Skip duplicate
-                }
-                this.recentWrites.set(filePath, now);
-
                 this.log(`Signal detected: [WriteFile] ${path.basename(filePath)}`);
 
-                // Emit signal with exact file path - this is better than AWS Q!
+                // Emit signal with exact file path - CheckpointManager handles deduplication
                 this.emitSignal({
                     filePaths: [filePath],
                     sessionId: this.extractSessionId(line)
@@ -344,17 +329,7 @@ export class KiroProvider extends BaseAIProvider {
         }
     }
 
-    /**
-     * Clean up old entries from recentWrites map to prevent memory leak.
-     */
-    private cleanupRecentWrites(): void {
-        const now = Date.now();
-        for (const [filePath, timestamp] of this.recentWrites) {
-            if (now - timestamp > this.WRITE_DEDUP_MS * 2) {
-                this.recentWrites.delete(filePath);
-            }
-        }
-    }
+
 
     /**
      * Extract session/execution ID from a log line (best effort).

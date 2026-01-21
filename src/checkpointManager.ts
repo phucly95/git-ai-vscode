@@ -64,8 +64,7 @@ export class CheckpointManager implements vscode.Disposable {
     private readonly MAX_PENDING_AGE_MS = 60000; // 60 seconds max age for pending checkpoints
     private readonly RAPID_CHANGE_DEBOUNCE_MS = 100; // Debounce rapid changes to same file
     private readonly CLEANUP_INTERVAL_MS = 10000; // Clean up every 10 seconds
-    private readonly AI_CHECKPOINT_GRACE_MS = 2000; // Grace period after AI checkpoint
-
+    private readonly AI_CHECKPOINT_GRACE_MS = 500; // Grace period after AI checkpoint (FileSystemWatcher duplicates < 200ms)
     /**
      * Track files that recently had AI checkpoints to prevent duplicate events.
      * Key: file path, Value: timestamp of AI checkpoint
