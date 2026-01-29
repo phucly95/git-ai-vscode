@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { BaseAIProvider } from './base-provider';
-import { AIProvider, PROVIDER_CONFIGS } from '../types';
+import { AIProvider, AISignalEvent, PROVIDER_CONFIGS } from '../types';
 
 export class AwsQProvider extends BaseAIProvider {
     private currentLogFile: string | null = null;
@@ -37,6 +37,11 @@ export class AwsQProvider extends BaseAIProvider {
     startWatching(): void {
         if (this.isWatching) {
             this.log('Already watching, skipping start');
+            return;
+        }
+
+        if (vscode.env.appName && vscode.env.appName.toLowerCase().includes('kiro')) {
+            this.log('Running in Kiro IDE - disabling AWS Q provider conflict');
             return;
         }
 
@@ -351,12 +356,17 @@ export class AwsQProvider extends BaseAIProvider {
      * 
      * @param fileChangeTimestamp - When the file change was detected (ms since epoch)
      * @param toleranceMs - Max time difference between log entry and file change (default 500ms)
-     * @returns true if AI signal found that correlates with the file change
+     * @returns AISignalEvent if found, null otherwise
      */
-    public hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500): boolean {
+    public hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500): AISignalEvent | null {
+        // STRICT CHECK: If running in Kiro IDE, absolutely ignore AWS Q signals
+        if (vscode.env.appName && vscode.env.appName.toLowerCase().includes('kiro')) {
+            return null;
+        }
+
         if (!this.currentLogFile || !fs.existsSync(this.currentLogFile)) {
             this.log('No log file available for synchronous check');
-            return false;
+            return null;
         }
 
         try {
@@ -398,7 +408,13 @@ export class AwsQProvider extends BaseAIProvider {
                 if (timeDiff <= toleranceMs) {
                     this.log(`Synchronous check: Found AI signal at ${timestampMatch[1]}, ` +
                         `diff=${timeDiff}ms from file change at ${new Date(fileChangeTimestamp).toISOString()}`);
-                    return true;
+
+                    return {
+                        provider: 'aws-q',
+                        timestamp: logTimestamp,
+                        filePaths: [], // AWS Q logs often don't have file paths in generic activity logs
+                        sessionId: this.windowSessionId
+                    };
                 }
 
                 // If log entry is too old (more than 30 seconds before file change), stop searching
@@ -408,11 +424,11 @@ export class AwsQProvider extends BaseAIProvider {
             }
 
             this.log(`Synchronous check: No correlating AI signal found within ${toleranceMs}ms of file change`);
-            return false;
+            return null;
 
         } catch (err) {
             this.log(`Synchronous check error: ${err}`);
-            return false;
+            return null;
         }
     }
 

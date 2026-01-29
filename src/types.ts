@@ -74,6 +74,8 @@ export interface PendingCheckpoint {
   sessionId?: string;
   /** Model name from the AI provider */
   model?: string;
+  /** Timer for delayed Human decision (race condition handling) */
+  decisionTimeout?: NodeJS.Timeout;
 }
 
 /**
@@ -157,8 +159,8 @@ export const IGNORED_PATHS = [
  */
 export function shouldIgnoreFile(filePath: string): boolean {
   const normalizedPath = filePath.replace(/\\/g, '/');
-  return IGNORED_PATHS.some(ignorePath => 
-    normalizedPath.includes(`/${ignorePath}/`) || 
+  return IGNORED_PATHS.some(ignorePath =>
+    normalizedPath.includes(`/${ignorePath}/`) ||
     normalizedPath.endsWith(`/${ignorePath}`) ||
     normalizedPath.endsWith(ignorePath)
   );

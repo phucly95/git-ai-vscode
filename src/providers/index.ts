@@ -23,9 +23,10 @@ export class ProviderRegistry implements vscode.Disposable {
      */
     private initializeProviders(): void {
         // Add all provider implementations
+        // ORDER MATTERS: Specific/Local providers (Kiro) should be checked before Generic/Cloud providers (AwsQ)
         this.providers = [
-            new AwsQProvider(),
-            new KiroProvider()
+            new KiroProvider(),
+            new AwsQProvider()
         ];
 
         this.outputChannel.appendLine(`[REGISTRY] Initialized ${this.providers.length} providers`);
@@ -108,24 +109,24 @@ export class ProviderRegistry implements vscode.Disposable {
      * 
      * @param fileChangeTimestamp - When the file was changed (ms since epoch)
      * @param toleranceMs - Max time difference (default 500ms based on log analysis)
-     * @returns true if any provider reports AI signal correlating with the file change
+     * @returns AISignalEvent if found, null otherwise
      */
-    hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500): boolean {
+    hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500): AISignalEvent | null {
         for (const provider of this.providers) {
             if (!provider.isInstalled()) continue;
 
             // Check if provider supports synchronous check
             if ('hasAISignalForChange' in provider && typeof (provider as any).hasAISignalForChange === 'function') {
-                const hasSignal = (provider as any).hasAISignalForChange(fileChangeTimestamp, toleranceMs);
-                if (hasSignal) {
+                const signal = (provider as any).hasAISignalForChange(fileChangeTimestamp, toleranceMs);
+                if (signal) {
                     this.outputChannel.appendLine(
                         `[REGISTRY] Synchronous check: ${provider.providerType} reports AI signal for change`
                     );
-                    return true;
+                    return signal; // Return the full event object
                 }
             }
         }
-        return false;
+        return null;
     }
 
     /**

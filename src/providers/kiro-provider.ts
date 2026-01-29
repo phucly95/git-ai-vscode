@@ -20,7 +20,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { BaseAIProvider } from './base-provider';
-import { AIProvider } from '../types';
+import { AIProvider, AISignalEvent } from '../types';
 
 export class KiroProvider extends BaseAIProvider {
     private currentLogFile: string | null = null;
@@ -28,13 +28,20 @@ export class KiroProvider extends BaseAIProvider {
     private pollingInterval: NodeJS.Timeout | null = null;
     private readonly POLL_INTERVAL_MS = 500; // Poll every 500ms for faster detection
     private readonly windowSessionId: string;
+    private workspacePaths: string[] = [];
+    private kiroDisposables: vscode.Disposable[] = [];
 
     // Kiro-specific signal pattern: [WriteFile] complete write file: /path/to/file
     private readonly WRITE_FILE_PATTERN = /\[WriteFile\] complete write file: (.+)/;
 
     constructor() {
         super('Git AI - Kiro Provider');
-        this.windowSessionId = vscode.env.sessionId;
+        // Use Process ID as the stable session identifier for this window
+        this.windowSessionId = process.pid.toString();
+        // Get ALL workspace paths for multi-root support
+        this.workspacePaths = (vscode.workspace.workspaceFolders ?? [])
+            .map(f => f.uri.fsPath);
+        this.log(`Initialized with PID ${process.pid}, workspaces: ${this.workspacePaths.join(', ') || 'none'}`);
     }
 
     get providerType(): AIProvider {
@@ -72,6 +79,20 @@ export class KiroProvider extends BaseAIProvider {
 
         this.log(`Starting log watcher (window session: ${this.windowSessionId})`);
         this.isWatching = true;
+
+        // Listen for workspace changes (user adds/removes folders)
+        this.kiroDisposables.push(
+            vscode.workspace.onDidChangeWorkspaceFolders(() => {
+                this.log('Workspace folders changed, updating paths...');
+                this.workspacePaths = (vscode.workspace.workspaceFolders ?? [])
+                    .map(f => f.uri.fsPath);
+                // Re-find log file in case we're watching wrong window
+                this.stopWatching();
+                this.isWatching = true;
+                this.findAndWatchLogFile();
+            })
+        );
+
         this.findAndWatchLogFile();
     }
 
@@ -84,6 +105,12 @@ export class KiroProvider extends BaseAIProvider {
         this.currentLogFile = null;
         this.currentLogSize = 0;
         this.log('Stopped watching');
+    }
+
+    dispose(): void {
+        this.stopWatching();
+        this.kiroDisposables.forEach(d => d.dispose());
+        this.kiroDisposables = [];
     }
 
     getDebugInfo(): string {
@@ -150,9 +177,12 @@ export class KiroProvider extends BaseAIProvider {
             return null;
         }
 
+        this.log(`Found ${sessions.length} sessions, checking: ${sessions.slice(0, 3).join(', ')}`);
+
         // Try sessions from newest to oldest (check last 3 for session restore)
         for (const sessionName of sessions.slice(0, 3)) {
             const sessionDir = path.join(logsDir, sessionName);
+            this.log(`Checking session: ${sessionName}`);
             const logFile = await this.findLogFileInSession(sessionDir);
             if (logFile) {
                 return logFile;
@@ -164,7 +194,10 @@ export class KiroProvider extends BaseAIProvider {
 
     /**
      * Find Kiro log file within a session directory.
-     * Handles multi-window scenarios by finding the most recently modified log.
+     * Detection priority:
+     * 1. PID match (exact window identification)
+     * 2. Workspace match ([WriteFile] paths match our workspace)
+     * 3. Fallback to mtime (for first edit scenarios)
      */
     private async findLogFileInSession(sessionDir: string): Promise<string | null> {
         const windowDirs = fs.readdirSync(sessionDir)
@@ -175,37 +208,32 @@ export class KiroProvider extends BaseAIProvider {
             return null;
         }
 
-        const candidates: Array<{ path: string; mtime: number }> = [];
+        // STRATEGY 1: Try exact PID match first (handles same-workspace multi-window)
+        const myWindowDir = this.findWindowDirByPid(windowDirs);
+        if (myWindowDir) {
+            const logFile = this.findKiroLogInWindow(myWindowDir);
+            if (logFile) {
+                this.log(`Selected log (PID match): ${logFile}`);
+                return logFile;
+            }
+        }
+
+        // Collect all candidate log files
+        const candidates: Array<{ path: string; mtime: number; windowDir: string }> = [];
         const now = Date.now();
-        // Increase timeout for session restore scenarios (30 minutes)
-        const MAX_AGE_MS = 1800000;
+        const MAX_AGE_MS = 1800000; // 30 minutes
 
         for (const windowDir of windowDirs) {
-            const extHostDir = path.join(windowDir, 'exthost');
-            if (!fs.existsSync(extHostDir)) continue;
-
-            try {
-                // Look for Kiro agent extensions
-                const kiroDirs = fs.readdirSync(extHostDir)
-                    .filter(f => f.includes('kiro'));
-
-                for (const kiroDir of kiroDirs) {
-                    // Kiro main log file
-                    const logPatterns = ['Kiro Logs.log', 'KiroLLMLogs.log'];
-
-                    for (const pattern of logPatterns) {
-                        const logFile = path.join(extHostDir, kiroDir, pattern);
-                        if (fs.existsSync(logFile)) {
-                            const stats = fs.statSync(logFile);
-                            // Only consider logs modified within the time window
-                            if (now - stats.mtimeMs < MAX_AGE_MS) {
-                                candidates.push({ path: logFile, mtime: stats.mtimeMs });
-                            }
-                        }
+            const logFile = this.findKiroLogInWindow(windowDir);
+            if (logFile) {
+                try {
+                    const stats = fs.statSync(logFile);
+                    if (now - stats.mtimeMs < MAX_AGE_MS) {
+                        candidates.push({ path: logFile, mtime: stats.mtimeMs, windowDir });
                     }
+                } catch (e) {
+                    this.log(`Error checking ${logFile}: ${e}`);
                 }
-            } catch (e) {
-                this.log(`Error scanning ${windowDir}: ${e}`);
             }
         }
 
@@ -213,7 +241,17 @@ export class KiroProvider extends BaseAIProvider {
             return null;
         }
 
-        // Return the most recently modified log file (prioritize "Kiro Logs.log")
+        // STRATEGY 2: Find log with WriteFile paths matching our workspace
+        if (this.workspacePaths.length > 0) {
+            for (const candidate of candidates) {
+                if (this.logMatchesWorkspace(candidate.path)) {
+                    this.log(`Selected log (workspace match): ${candidate.path}`);
+                    return candidate.path;
+                }
+            }
+        }
+
+        // STRATEGY 3: Fallback to mtime (for first edit or no match scenarios)
         candidates.sort((a, b) => {
             // Prefer Kiro Logs.log over KiroLLMLogs.log
             const aIsMain = a.path.endsWith('Kiro Logs.log');
@@ -223,7 +261,95 @@ export class KiroProvider extends BaseAIProvider {
             return b.mtime - a.mtime;
         });
 
+        this.log(`Selected log (mtime fallback): ${candidates[0].path}`);
         return candidates[0].path;
+    }
+
+    /**
+     * Find Kiro log file in a window directory.
+     */
+    private findKiroLogInWindow(windowDir: string): string | null {
+        const extHostDir = path.join(windowDir, 'exthost');
+        if (!fs.existsSync(extHostDir)) return null;
+
+        try {
+            const kiroDirs = fs.readdirSync(extHostDir).filter(f => f.includes('kiro'));
+            for (const kiroDir of kiroDirs) {
+                const logFile = path.join(extHostDir, kiroDir, 'Kiro Logs.log');
+                if (fs.existsSync(logFile)) {
+                    return logFile;
+                }
+            }
+        } catch (e) {
+            this.log(`Error finding log in ${windowDir}: ${e}`);
+        }
+        return null;
+    }
+
+    /**
+     * Find the window directory matching our extension host PID.
+     * Each window has its own exthost.log with "Extension host with pid XXXX started"
+     */
+    private findWindowDirByPid(windowDirs: string[]): string | null {
+        const myPid = process.pid.toString();
+
+        for (const windowDir of windowDirs) {
+            const exthostLog = path.join(windowDir, 'exthost', 'exthost.log');
+            if (fs.existsSync(exthostLog)) {
+                try {
+                    // Read first 500 bytes - PID is in the first line
+                    const fd = fs.openSync(exthostLog, 'r');
+                    const buffer = Buffer.alloc(500);
+                    fs.readSync(fd, buffer, 0, 500, 0);
+                    fs.closeSync(fd);
+
+                    const content = buffer.toString();
+                    if (content.includes(`pid ${myPid}`)) {
+                        this.log(`Found my window by PID ${myPid}: ${path.basename(windowDir)}`);
+                        return windowDir;
+                    }
+                } catch (e) {
+                    // Ignore read errors
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Check if a log file contains WriteFile entries matching our workspace paths.
+     */
+    private logMatchesWorkspace(logPath: string): boolean {
+        try {
+            const stats = fs.statSync(logPath);
+            if (stats.size === 0) return false;
+
+            // Read last 50KB of log file
+            const readSize = Math.min(50000, stats.size);
+            const start = Math.max(0, stats.size - readSize);
+            const fd = fs.openSync(logPath, 'r');
+            const buffer = Buffer.alloc(readSize);
+            fs.readSync(fd, buffer, 0, readSize, start);
+            fs.closeSync(fd);
+
+            const content = buffer.toString();
+            const writeFileMatches = content.match(/\[WriteFile\] complete write file: (.+)/g);
+            if (!writeFileMatches) return false;
+
+            // Check if ANY WriteFile path matches ANY of our workspaces
+            for (const match of writeFileMatches) {
+                const filePath = match.replace('[WriteFile] complete write file: ', '').trim();
+                for (const wsPath of this.workspacePaths) {
+                    if (filePath.startsWith(wsPath)) {
+                        this.log(`Found matching WriteFile in ${path.basename(wsPath)}`);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
     }
 
     /**
@@ -323,7 +449,7 @@ export class KiroProvider extends BaseAIProvider {
                 // Emit signal with exact file path - CheckpointManager handles deduplication
                 this.emitSignal({
                     filePaths: [filePath],
-                    sessionId: this.extractSessionId(line)
+                    sessionId: this.windowSessionId
                 });
             }
         }
@@ -331,27 +457,7 @@ export class KiroProvider extends BaseAIProvider {
 
 
 
-    /**
-     * Extract session/execution ID from a log line (best effort).
-     */
-    private extractSessionId(line: string): string | undefined {
-        // Pattern: Look for execution IDs in Kiro logs
-        const sessionPatterns = [
-            /execution (\w{8}-\w{4}-\w{4}-\w{4}-\w{12})/,
-            /executionId['\":\s]+([a-zA-Z0-9-]+)/,
-            /agentId['\":\s]+([a-zA-Z0-9-]+)/,
-            /in ([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/  // From Steering
-        ];
 
-        for (const pattern of sessionPatterns) {
-            const match = line.match(pattern);
-            if (match && match[1]) {
-                return match[1];
-            }
-        }
-
-        return undefined;
-    }
 
     /**
      * SYNCHRONOUS check for AI signal that matches a specific file change.
@@ -362,12 +468,12 @@ export class KiroProvider extends BaseAIProvider {
      * @param fileChangeTimestamp - When the file change was detected (ms since epoch)
      * @param filePath - Optional: specific file path to match
      * @param toleranceMs - Max time difference (default 500ms based on log analysis)
-     * @returns true if AI signal found that matches the file change
+     * @returns AISignalEvent if found, null otherwise
      */
-    public hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500, filePath?: string): boolean {
+    public hasAISignalForChange(fileChangeTimestamp: number, toleranceMs: number = 500, filePath?: string): AISignalEvent | null {
         if (!this.currentLogFile || !fs.existsSync(this.currentLogFile)) {
             this.log('No log file available for synchronous check');
-            return false;
+            return null;
         }
 
         try {
@@ -414,7 +520,13 @@ export class KiroProvider extends BaseAIProvider {
                 if (timeDiff <= toleranceMs) {
                     this.log(`Synchronous check: Found Kiro AI signal for ${path.basename(logFilePath)}, ` +
                         `diff=${timeDiff}ms from file change`);
-                    return true;
+
+                    return {
+                        provider: 'kiro',
+                        timestamp: logTimestamp,
+                        filePaths: [logFilePath],
+                        sessionId: this.windowSessionId
+                    };
                 }
 
                 // If log entry is too old (more than 30 seconds before file change), stop searching
@@ -424,11 +536,11 @@ export class KiroProvider extends BaseAIProvider {
             }
 
             this.log(`Synchronous check: No correlating Kiro AI signal found within ${toleranceMs}ms`);
-            return false;
+            return null;
 
         } catch (err) {
             this.log(`Synchronous check error: ${err}`);
-            return false;
+            return null;
         }
     }
 

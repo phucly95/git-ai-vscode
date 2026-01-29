@@ -2,7 +2,7 @@
     "name": "git-ai-tracking",
     "displayName": "Git AI Tracking",
     "description": "Intelligent autosave & tracking for AI-assisted coding (AWS Q, Copilot, etc.)",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "publisher": "rdb-platform",
     "engines": {
         "vscode": "^1.85.0"

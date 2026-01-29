@@ -65,6 +65,7 @@ export class CheckpointManager implements vscode.Disposable {
     private readonly RAPID_CHANGE_DEBOUNCE_MS = 100; // Debounce rapid changes to same file
     private readonly CLEANUP_INTERVAL_MS = 10000; // Clean up every 10 seconds
     private readonly AI_CHECKPOINT_GRACE_MS = 500; // Grace period after AI checkpoint (FileSystemWatcher duplicates < 200ms)
+    private readonly DECISION_WAIT_MS = 1000; // Wait 1s for potential delayed AI signal (Wait & Decide)
     /**
      * Track files that recently had AI checkpoints to prevent duplicate events.
      * Key: file path, Value: timestamp of AI checkpoint
@@ -204,6 +205,11 @@ export class CheckpointManager implements vscode.Disposable {
             for (const filePath of event.filePaths) {
                 const pending = this.pendingCheckpoints.get(filePath);
                 if (pending && !pending.aiSignalReceived) {
+                    // CANCEL HUMAN TIMER if exists
+                    if (pending.decisionTimeout) {
+                        clearTimeout(pending.decisionTimeout);
+                        pending.decisionTimeout = undefined;
+                    }
                     this.markAsAi(pending, event);
                 }
             }
@@ -215,6 +221,11 @@ export class CheckpointManager implements vscode.Disposable {
 
             for (const pending of this.pendingCheckpoints.values()) {
                 if (!pending.aiSignalReceived && (now - pending.changeTimestamp) < RECENT_THRESHOLD_MS) {
+                    // CANCEL HUMAN TIMER if exists
+                    if (pending.decisionTimeout) {
+                        clearTimeout(pending.decisionTimeout);
+                        pending.decisionTimeout = undefined;
+                    }
                     this.markAsAi(pending, event);
                 }
             }
@@ -244,6 +255,46 @@ export class CheckpointManager implements vscode.Disposable {
             `[MANAGER] AI signal matched to file change, executing immediately: ${path.basename(pending.filePath)}`
         );
         this.executeCheckpoint(pending);
+    }
+
+    /**
+     * WAIT DECISION: Wait for potential AI signal before committing as Human.
+     * This handles race conditions where AI logs are written slightly after file cycle.
+     */
+    private waitForAiSignalDecision(pending: PendingCheckpoint): void {
+        // Clear any existing timeout
+        if (pending.decisionTimeout) {
+            clearTimeout(pending.decisionTimeout);
+        }
+
+        this.outputChannel.appendLine(
+            `[MANAGER] Waiting for potential AI signal (${this.DECISION_WAIT_MS}ms): ${path.basename(pending.filePath)}`
+        );
+
+        // Start timer
+        pending.decisionTimeout = setTimeout(() => {
+            // Timer expired - Check one last time
+            if (this.providerRegistry) {
+                const signal = this.providerRegistry.hasAISignalForChange(pending.changeTimestamp);
+                if (signal) {
+                    this.outputChannel.appendLine(
+                        `[MANAGER] AI signal detected (after wait): ${path.basename(pending.filePath)}`
+                    );
+                    pending.aiSignalReceived = true;
+                    pending.provider = signal.provider;
+                    pending.sessionId = signal.sessionId;
+                    this.executeCheckpoint(pending);
+                    return;
+                }
+            }
+
+            // Still no signal - Commit as Human
+            this.outputChannel.appendLine(
+                `[MANAGER] No AI signal detected (after wait), treating as human: ${path.basename(pending.filePath)}`
+            );
+            this.executeCheckpoint(pending);
+
+        }, this.DECISION_WAIT_MS);
     }
 
     /**
@@ -299,23 +350,22 @@ export class CheckpointManager implements vscode.Disposable {
         // DETERMINISTIC CHECK 2: Synchronously read log file for AI signals
         // that correlate with this specific file change (within 500ms tolerance)
         if (this.providerRegistry) {
-            const hasCorrelatingSignal = this.providerRegistry.hasAISignalForChange(pending.changeTimestamp);
-            if (hasCorrelatingSignal) {
+            const correlatingSignal = this.providerRegistry.hasAISignalForChange(pending.changeTimestamp);
+            if (correlatingSignal) {
                 this.outputChannel.appendLine(
                     `[MANAGER] AI signal detected (synchronous check, correlated with change): ${path.basename(filePath)}`
                 );
                 pending.aiSignalReceived = true;
-                pending.provider = 'aws-q'; // Default to AWS Q for now
+                pending.provider = correlatingSignal.provider;
+                pending.sessionId = correlatingSignal.sessionId;
                 this.executeCheckpoint(pending);
                 return;
             }
         }
 
-        // No AI signal detected - this is a human edit
-        this.outputChannel.appendLine(
-            `[MANAGER] No AI signal detected, treating as human: ${path.basename(filePath)}`
-        );
-        this.executeCheckpoint(pending);
+        // START WAIT DECISION: Do not execute human checkpoint yet
+        // Wait for potential delayed AI signal (e.g. Kiro log delay)
+        this.waitForAiSignalDecision(pending);
     }
 
 
