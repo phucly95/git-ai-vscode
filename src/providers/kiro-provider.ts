@@ -197,7 +197,8 @@ export class KiroProvider extends BaseAIProvider {
      * Detection priority:
      * 1. PID match (exact window identification)
      * 2. Workspace match ([WriteFile] paths match our workspace)
-     * 3. Fallback to mtime (for first edit scenarios)
+     * 
+     * REMOVED: mtime fallback (unreliable during slow boot)
      */
     private async findLogFileInSession(sessionDir: string): Promise<string | null> {
         const windowDirs = fs.readdirSync(sessionDir)
@@ -211,20 +212,25 @@ export class KiroProvider extends BaseAIProvider {
         // STRATEGY 1: Try exact PID match first (handles same-workspace multi-window)
         const myWindowDir = this.findWindowDirByPid(windowDirs);
         if (myWindowDir) {
-            const logFile = this.findKiroLogInWindow(myWindowDir);
+            this.log(`PID match found: ${path.basename(myWindowDir)}. Checking for agent log...`);
+            // This is now async and might wait up to 30s
+            const logFile = await this.findKiroLogInWindow(myWindowDir);
             if (logFile) {
                 this.log(`Selected log (PID match): ${logFile}`);
                 return logFile;
+            } else {
+                this.log(`PID match found but agent log never appeared in ${myWindowDir}`);
             }
         }
 
-        // Collect all candidate log files
+        // Collect all candidate log files (only if they exist NOW)
         const candidates: Array<{ path: string; mtime: number; windowDir: string }> = [];
         const now = Date.now();
         const MAX_AGE_MS = 1800000; // 30 minutes
 
         for (const windowDir of windowDirs) {
-            const logFile = this.findKiroLogInWindow(windowDir);
+            // Instant check for other windows (don't wait for them)
+            const logFile = await this.findKiroLogInWindow(windowDir, false);
             if (logFile) {
                 try {
                     const stats = fs.statSync(logFile);
@@ -251,39 +257,87 @@ export class KiroProvider extends BaseAIProvider {
             }
         }
 
-        // STRATEGY 3: Fallback to mtime (for first edit or no match scenarios)
-        candidates.sort((a, b) => {
-            // Prefer Kiro Logs.log over KiroLLMLogs.log
-            const aIsMain = a.path.endsWith('Kiro Logs.log');
-            const bIsMain = b.path.endsWith('Kiro Logs.log');
-            if (aIsMain && !bIsMain) return -1;
-            if (!aIsMain && bIsMain) return 1;
-            return b.mtime - a.mtime;
-        });
-
-        this.log(`Selected log (mtime fallback): ${candidates[0].path}`);
-        return candidates[0].path;
+        // REMOVED: Fallback to mtime
+        // If we can't identify the window by PID or Workspace Content, we should NOT guess.
+        // Falling back to mtime on slow machines causes multiple windows to hook into the same log.
+        this.log('No matching log found (PID or Workspace content). Skipping mtime fallback to prevent conflicts.');
+        return null;
     }
 
     /**
      * Find Kiro log file in a window directory.
+     * @param waitForIt If true, waits up to 30s for the folder to appear using fs.watch
      */
-    private findKiroLogInWindow(windowDir: string): string | null {
+    private async findKiroLogInWindow(windowDir: string, waitForIt: boolean = true): Promise<string | null> {
         const extHostDir = path.join(windowDir, 'exthost');
         if (!fs.existsSync(extHostDir)) return null;
 
-        try {
-            const kiroDirs = fs.readdirSync(extHostDir).filter(f => f.includes('kiro'));
-            for (const kiroDir of kiroDirs) {
-                const logFile = path.join(extHostDir, kiroDir, 'Kiro Logs.log');
-                if (fs.existsSync(logFile)) {
-                    return logFile;
+        const findLogNow = (): string | null => {
+            try {
+                if (!fs.existsSync(extHostDir)) return null;
+                const kiroDirs = fs.readdirSync(extHostDir).filter(f => f.includes('kiro'));
+                for (const kiroDir of kiroDirs) {
+                    const logFile = path.join(extHostDir, kiroDir, 'Kiro Logs.log');
+                    if (fs.existsSync(logFile)) {
+                        return logFile;
+                    }
                 }
+            } catch (e) {
+                this.log(`Error finding log in ${windowDir}: ${e}`);
             }
-        } catch (e) {
-            this.log(`Error finding log in ${windowDir}: ${e}`);
-        }
-        return null;
+            return null;
+        };
+
+        // 1. Try to find immediately
+        const immediateLog = findLogNow();
+        if (immediateLog) return immediateLog;
+
+        if (!waitForIt) return null;
+
+        // 2. If not found and we should wait, set up watcher
+        this.log(`Agent log not found in ${path.basename(windowDir)}, waiting up to 30s...`);
+
+        return new Promise<string | null>((resolve) => {
+            let resolved = false;
+            let watcher: fs.FSWatcher | null = null;
+
+            const cleanup = () => {
+                if (resolved) return;
+                resolved = true;
+                if (watcher) {
+                    watcher.close();
+                }
+                clearTimeout(timeoutId);
+            };
+
+            // Timeout after 30s
+            const timeoutId = setTimeout(() => {
+                cleanup();
+                this.log(`Timeout waiting for agent log in ${windowDir}`);
+                // Alert the user so they know why AI isn't working
+                vscode.window.showErrorMessage(`Git AI: Timeout waiting for Kiro Agent logs. Window PID matched but log folder never appeared.`);
+                resolve(null);
+            }, 30000);
+
+            try {
+                // Watch the exthost directory for new folders (kiro.kiroAgent)
+                watcher = fs.watch(extHostDir, (eventType, filename) => {
+                    if (resolved) return;
+
+                    // On 'rename' (creation) or any change, check if our target exists
+                    const found = findLogNow();
+                    if (found) {
+                        this.log(`Agent log appeared! ${found}`);
+                        cleanup();
+                        resolve(found);
+                    }
+                });
+            } catch (e) {
+                this.log(`Failed to watch directory ${extHostDir}: ${e}`);
+                cleanup();
+                resolve(null);
+            }
+        });
     }
 
     /**
